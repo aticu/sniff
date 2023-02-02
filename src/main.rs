@@ -250,7 +250,11 @@ fn run(config: Config) -> anyhow::Result<()> {
             let full_diff = {
                 firestorm::profile_section!(diff_computation);
 
-                diff::DiffTree::compute(&former.root, &latter.as_ref().unwrap_or(&former).root)
+                if let Some(ref latter) = latter {
+                    diff::DiffTree::compute(&former.root, &latter.root)
+                } else {
+                    diff::DiffTree::unchanged(&former.root)
+                }
             };
 
             let path = entry.as_deref().unwrap_or_else(|| Path::new("/"));
@@ -394,7 +398,6 @@ fn run(config: Config) -> anyhow::Result<()> {
                     path.as_os_str(),
                     diff,
                     diff::visualize::VisualizationContext {
-                        filter: &diff::filters::all,
                         color_filter: &display_filter,
                         size_metric,
                         database: database.as_ref(),

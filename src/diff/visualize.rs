@@ -152,13 +152,7 @@ pub(crate) enum ColorFilter {
 }
 
 /// The context required for visualization
-pub(crate) struct VisualizationContext<
-    'a,
-    F: Fn(FilterContext<'a>) -> bool,
-    C: Fn(FilterContext<'a>) -> ColorFilter,
-> {
-    /// The filter to apply on entries being visualized.
-    pub(crate) filter: &'a F,
+pub(crate) struct VisualizationContext<'a, C: Fn(FilterContext<'a>) -> ColorFilter> {
     /// The color filter to apply on entries being visualized.
     pub(crate) color_filter: &'a C,
     /// The size metric to use for the size of entries.
@@ -167,12 +161,9 @@ pub(crate) struct VisualizationContext<
     pub(crate) database: Option<&'a Database>,
 }
 
-impl<'a, F: Fn(FilterContext<'a>) -> bool, C: Fn(FilterContext<'a>) -> ColorFilter> Clone
-    for VisualizationContext<'a, F, C>
-{
+impl<'a, C: Fn(FilterContext<'a>) -> ColorFilter> Clone for VisualizationContext<'a, C> {
     fn clone(&self) -> Self {
         Self {
-            filter: self.filter,
             color_filter: self.color_filter,
             size_metric: self.size_metric,
             database: self.database,
@@ -180,10 +171,7 @@ impl<'a, F: Fn(FilterContext<'a>) -> bool, C: Fn(FilterContext<'a>) -> ColorFilt
     }
 }
 
-impl<'a, F: Fn(FilterContext<'a>) -> bool, C: Fn(FilterContext<'a>) -> ColorFilter> Copy
-    for VisualizationContext<'a, F, C>
-{
-}
+impl<'a, C: Fn(FilterContext<'a>) -> ColorFilter> Copy for VisualizationContext<'a, C> {}
 
 /// An item that will be or is laid out in a tree map.
 #[derive(Debug)]
@@ -203,10 +191,7 @@ pub(crate) fn generate_image(
     path: impl AsRef<Path>,
     name: &OsStr,
     diff: &super::DiffTree,
-    ctx: VisualizationContext<
-        impl Fn(FilterContext) -> bool,
-        impl Fn(FilterContext) -> ColorFilter,
-    >,
+    ctx: VisualizationContext<impl Fn(FilterContext) -> ColorFilter>,
 ) -> anyhow::Result<()> {
     let path = path.as_ref();
 
@@ -237,26 +222,19 @@ fn draw_into(
     rect: Rect,
     (name, diff): (&OsStr, &super::DiffTree),
     is_outer: bool,
-    ctx: VisualizationContext<
-        impl Fn(FilterContext) -> bool,
-        impl Fn(FilterContext) -> ColorFilter,
-    >,
+    ctx: VisualizationContext<impl Fn(FilterContext) -> ColorFilter>,
 ) -> anyhow::Result<()> {
+    // there's nothing to draw, so quit early
+    if rect.w == 0 || rect.h == 0 {
+        return Ok(());
+    }
+
     let mut items = if let DirEntry::Directory(dir) = &diff.entry {
         firestorm::profile_section!(build_items);
 
         Vec::from_iter(
             dir.entries
                 .iter()
-                .filter(|(name, entry)| {
-                    (ctx.filter)(FilterContext {
-                        name,
-                        entry,
-                        database: ctx.database,
-                    }) || entry
-                        .walk()
-                        .any(|child| child.filter(ctx.database, ctx.filter).unwrap_or(false))
-                })
                 .map(|(name, entry)| TreeItem {
                     subtree: entry,
                     name,

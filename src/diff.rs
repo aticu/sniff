@@ -355,8 +355,16 @@ impl DiffTree {
         }
     }
 
+    /// Converts the given entry into a difference tree where everything is unchanged.
+    pub(crate) fn unchanged(root: &MetaDEntry) -> Self {
+        root.with_context(&mut |_| DiffType::Unchanged {
+            metadata_changed_to: None,
+        })
+    }
+
     /// Computes the size of the difference using the given size metric.
     fn size(&self, size_metric: SizeMetric) -> u64 {
+        firestorm::profile_fn!(size_computation);
         self.walk()
             .map(|entry| (size_metric.calculate)(entry.entry))
             .sum()
@@ -384,7 +392,7 @@ impl DiffTree {
         name: &OsStr,
         ctx: DisplayContext<impl Fn(FilterContext) -> bool>,
     ) -> fmt::Result {
-        firestorm::profile_method!(recursive_tree_display);
+        firestorm::profile_section!(recursive_tree_display);
 
         let detailed = !self.is_dir() && depth == 0 || ctx.summary_level == Some(0);
 

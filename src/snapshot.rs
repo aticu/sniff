@@ -306,24 +306,41 @@ impl SnapshotLatest {
     pub(crate) fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         firestorm::profile_method!(from_file);
 
-        let mut in_file = std::fs::File::open(path)?;
+        use std::io::Read as _;
 
-        let header = SnapshotFileHeader::read_from_file(&mut in_file)?;
+        let (header, data) = {
+            firestorm::profile_section!(reading_file);
+            let mut in_file = std::fs::File::open(path)?;
+
+            let header = SnapshotFileHeader::read_from_file(&mut in_file)?;
+
+            let mut data = Vec::new();
+            in_file.read_to_end(&mut data)?;
+
+            (header, data)
+        };
 
         match header.version {
             0 => Err(anyhow::anyhow!(
                 "version 0 snapshots are no longer supported"
             )),
             1 => {
+                let data = {
+                    firestorm::profile_section!(decompressing_file);
+                    let mut decoded_data = Vec::new();
+                    flate2::read::GzDecoder::new(&data[..]).read_to_end(&mut decoded_data)?;
+                    decoded_data
+                };
+
                 let v1: Snapshot<
                     crate::fs::DEntryV1<()>,
                     crate::fs::metadata::MetadataV1,
                     Autoruns,
                     Updates,
-                > = bincode::Options::deserialize_from(
-                    Self::bincode(),
-                    std::io::BufReader::new(flate2::read::GzDecoder::new(in_file)),
-                )?;
+                > = {
+                    firestorm::profile_section!(deserializing_file);
+                    bincode::Options::deserialize_from(Self::bincode(), &data[..])?
+                };
 
                 Ok(Self {
                     root: v1.root.into(),
@@ -335,10 +352,17 @@ impl SnapshotLatest {
                 })
             }
             2 => {
-                let v2: SnapshotLatest = bincode::Options::deserialize_from(
-                    Self::bincode(),
-                    std::io::BufReader::new(flate2::read::GzDecoder::new(in_file)),
-                )?;
+                let data = {
+                    firestorm::profile_section!(decompressing_file);
+                    let mut decoded_data = Vec::new();
+                    flate2::read::GzDecoder::new(&data[..]).read_to_end(&mut decoded_data)?;
+                    decoded_data
+                };
+
+                let v2: SnapshotLatest = {
+                    firestorm::profile_section!(deserializing_file);
+                    bincode::Options::deserialize_from(Self::bincode(), &data[..])?
+                };
 
                 Ok(v2)
             }

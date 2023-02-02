@@ -404,6 +404,8 @@ pub(super) fn display_renames(
     database: &Database,
     detailed: bool,
 ) -> fmt::Result {
+    firestorm::profile_fn!(display_renames);
+
     if let Some((mut paths, own_paths, direction)) = match context {
         super::DiffType::Added => Some((
             database

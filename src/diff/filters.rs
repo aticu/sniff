@@ -24,11 +24,6 @@ pub(crate) struct FilterContext<'a> {
 /// The type of a dynamic filter.
 pub(crate) type DynFilter<'a> = Box<dyn Fn(FilterContext) -> bool + 'a>;
 
-/// Allows all entries.
-pub(crate) fn all(_ctx: FilterContext) -> bool {
-    true
-}
-
 /// Allows only entries with at least one timestamp before `before` and after `after`.
 ///
 /// Optionally only the timestamps relevant for file content changes are compared.
@@ -52,6 +47,8 @@ pub(crate) fn timestamps(
         }
     };
 
+    // I think this is more readable than the "minimal" version clippy suggests
+    #[allow(clippy::nonminimal_bool)]
     let meta_matches = move |metadata: &Metadata| {
         (!only_changes && ts_matches(metadata.accessed))
             || (!only_changes && ts_matches(metadata.mft_modified))

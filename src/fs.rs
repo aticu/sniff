@@ -76,6 +76,7 @@ pub(crate) type DirectoryV1<Context = ()> =
 
 impl<Context> From<MetaDEntryV1<Context>> for MetaDEntry<Context> {
     fn from(entry: MetaDEntryV1<Context>) -> Self {
+        firestorm::profile_section!(v1_snapshot_conversion);
         Self {
             entry: entry.entry.into(),
             metadata: entry.metadata.into(),
