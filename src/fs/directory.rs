@@ -43,6 +43,8 @@ impl<DirEntry: GenericDirEntry<Metadata, Context>, Metadata: GenericMetadata, Co
         path: impl AsRef<Path>,
         trim_symlink_path: impl FnMut(PathBuf) -> PathBuf,
     ) -> io::Result<Self> {
+        firestorm::profile_fn!(both_from_path);
+
         let path = path.as_ref();
 
         let metadata = Metadata::from_path(path)?;
@@ -110,6 +112,8 @@ impl<DirEntry: GenericDirEntry<Metadata, Context>, Metadata: GenericMetadata, Co
 
     /// Inserts an entry with the given entry information into the given path.
     pub(crate) fn insert(&mut self, path: impl AsRef<Path>, entry: Self) {
+        firestorm::profile_fn!(insert);
+
         let path = path.as_ref();
 
         let mut components = path.components().skip(1).peekable();

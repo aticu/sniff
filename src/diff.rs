@@ -17,7 +17,7 @@ use self::{file::display_file, filters::FilterContext, metadata::display_metadat
 pub(crate) mod display_filters;
 mod file;
 pub(crate) mod filters;
-mod metadata;
+pub(crate) mod metadata;
 pub(crate) mod visualize;
 
 /// The possible metrics for measuring the size of diffs.
@@ -305,7 +305,7 @@ impl DiffTree {
     /// Compute the difference tree between two directory entries.
     pub(crate) fn compute(former: &MetaDEntry, latter: &MetaDEntry) -> Self {
         if former.entry == latter.entry {
-            let mut entry = former.with_context(&mut |_| DiffType::Unchanged {
+            let mut entry = former.with_context(&mut || DiffType::Unchanged {
                 metadata_changed_to: None,
             });
             if former.metadata != latter.metadata {
@@ -329,7 +329,7 @@ impl DiffTree {
                         } else {
                             entries.insert(
                                 name.clone(),
-                                entry.with_context(&mut |_| DiffType::Removed),
+                                entry.with_context(&mut || DiffType::Removed),
                             );
                         }
                     }
@@ -337,7 +337,7 @@ impl DiffTree {
                     for (name, entry) in &latter_dir.entries {
                         if !former_dir.entries.contains_key(name) {
                             entries
-                                .insert(name.clone(), entry.with_context(&mut |_| DiffType::Added));
+                                .insert(name.clone(), entry.with_context(&mut || DiffType::Added));
                         }
                     }
 
@@ -350,14 +350,14 @@ impl DiffTree {
                         },
                     }
                 }
-                _ => former.with_context(&mut |_| DiffType::Changed { to: latter.clone() }),
+                _ => former.with_context(&mut || DiffType::Changed { to: latter.clone() }),
             }
         }
     }
 
     /// Converts the given entry into a difference tree where everything is unchanged.
     pub(crate) fn unchanged(root: &MetaDEntry) -> Self {
-        root.with_context(&mut |_| DiffType::Unchanged {
+        root.with_context(&mut || DiffType::Unchanged {
             metadata_changed_to: None,
         })
     }
@@ -756,5 +756,154 @@ fn display_type_change(
         writeln!(f, "type changed: {} -> {}", former.red(), latter.green())
     } else {
         write!(f, "{} -> {}", former.red(), latter.green())
+    }
+}
+
+use sniff_interop as interop;
+
+/// Computes if a change occurred.
+fn compute_change<T: Eq + Clone>(old: &T, new: &T) -> Option<interop::Change<T>> {
+    if old == new {
+        None
+    } else {
+        Some(interop::Change {
+            from: old.clone(),
+            to: new.clone(),
+        })
+    }
+}
+
+/// Computes if a change occurred.
+fn compute_maybe_change<T: Eq + Clone>(old: &T, new: &T) -> interop::MaybeChange<T> {
+    if let Some(change) = compute_change(old, new) {
+        interop::MaybeChange::Change(change)
+    } else {
+        interop::MaybeChange::Same(old.clone())
+    }
+}
+
+/// Computes the difference between two given entries.
+pub(crate) fn compute_entry_diff<
+    Context: Eq + Serialize + serde::de::DeserializeOwned + Clone + Sized + Send,
+>(
+    old: &fs::DEntry<Context>,
+    new: &fs::DEntry<Context>,
+) -> Option<interop::EntryDiff> {
+    if old == new {
+        return None;
+    }
+
+    match (old, new) {
+        (DirEntry::File(old_file), DirEntry::File(new_file)) => {
+            Some(interop::EntryDiff::FileChanged {
+                hash_change: compute_change(
+                    &interop::Hash(old_file.sha2_256_hash.bytes),
+                    &interop::Hash(new_file.sha2_256_hash.bytes),
+                )?,
+            })
+        }
+        (
+            DirEntry::Symlink(fs::Symlink {
+                link_path: old_path,
+            }),
+            DirEntry::Symlink(fs::Symlink {
+                link_path: new_path,
+            }),
+        ) => Some(interop::EntryDiff::SymlinkChanged {
+            path_change: compute_change(
+                &old_path.to_string_lossy().into_owned(),
+                &new_path.to_string_lossy().into_owned(),
+            )?,
+        }),
+        (old, new) => {
+            if let Some(type_change) =
+                compute_change(&old.entry_type().to_string(), &new.entry_type().to_string())
+            {
+                Some(interop::EntryDiff::TypeChange(type_change))
+            } else {
+                Some(interop::EntryDiff::OtherChange)
+            }
+        }
+    }
+}
+
+/// Computes the difference between two given entries.
+pub(crate) fn compute_meta_entry_diff<
+    Context: Eq + Serialize + serde::de::DeserializeOwned + Clone + Sized + Send,
+>(
+    old: Option<&fs::MetaDEntry<Context>>,
+    new: Option<&fs::MetaDEntry<Context>>,
+) -> Option<interop::MetaEntryDiff<interop::Timestamp>> {
+    let (old, new) = match (old, new) {
+        (None, None) => return None,
+        (None, Some(new)) => {
+            return Some(interop::MetaEntryDiff::Added(
+                metadata::compute_meta_info_from_single(&new.metadata),
+            ))
+        }
+        (Some(old), None) => {
+            return Some(interop::MetaEntryDiff::Deleted(
+                metadata::compute_meta_info_from_single(&old.metadata),
+            ))
+        }
+        (Some(old), Some(new)) => (old, new),
+    };
+
+    let entry_diff = compute_entry_diff(&old.entry, &new.entry);
+    let meta_info = metadata::compute_meta_info_change(&old.metadata, &new.metadata);
+
+    entry_diff.map(|entry_diff| interop::MetaEntryDiff::EntryChange(entry_diff, meta_info))
+}
+
+/// Computes a set of changes for the given diff tree.
+pub(crate) fn compute_changeset(
+    base_path: impl AsRef<std::path::Path>,
+    diff: &MetaDEntry<DiffType>,
+    filter: impl Fn(crate::diff::filters::FilterContext) -> bool,
+    earliest_timestamp: crate::timestamp::Timestamp,
+) -> interop::Changeset<interop::Timestamp> {
+    let base_path = base_path.as_ref();
+    let mut changes = std::collections::BTreeMap::new();
+
+    for entry in diff
+        .walk()
+        .filter(|entry| entry.filter(None, &filter).unwrap_or(false))
+    {
+        let mut path = std::path::PathBuf::from(base_path);
+        path.extend(
+            entry
+                .path_components()
+                .skip_while(|component| *component == std::ffi::OsStr::new("/")),
+        );
+
+        let diff = match &entry.entry.context {
+            DiffType::Added => compute_meta_entry_diff(None, Some(entry.entry)),
+            DiffType::Removed => compute_meta_entry_diff(Some(entry.entry), None),
+            DiffType::Changed { to } => {
+                compute_meta_entry_diff(Some(&entry.entry.with_context(&mut || ())), Some(to))
+            }
+            DiffType::Unchanged {
+                metadata_changed_to: Some(new_meta),
+            }
+            | DiffType::ChildrenChanged {
+                metadata_changed_to: Some(new_meta),
+            } => Some(interop::MetaEntryDiff::MetaOnlyChange(
+                metadata::compute_meta_info_change(&entry.entry.metadata, new_meta),
+            )),
+            DiffType::Unchanged {
+                metadata_changed_to: None,
+            }
+            | DiffType::ChildrenChanged {
+                metadata_changed_to: None,
+            } => None,
+        };
+        if let Some(diff) = diff {
+            changes.insert(path.to_string_lossy().into_owned(), diff);
+        }
+    }
+
+    interop::Changeset {
+        earliest_timestamp: earliest_timestamp.into(),
+        changes,
     }
 }

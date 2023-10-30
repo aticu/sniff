@@ -67,6 +67,8 @@ pub(crate) trait GenericMetadata:
 
 impl GenericMetadata for Metadata {
     fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
+        firestorm::profile_fn!(meta_from_path);
+
         let path = path.as_ref();
 
         let metadata = std::fs::symlink_metadata(path)?;

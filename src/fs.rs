@@ -108,13 +108,13 @@ impl<Context> From<DirectoryV1<Context>> for Directory<DEntry<Context>, Metadata
     }
 }
 
-impl<Context> MetaDEntry<Context> {
+impl<Context> DEntry<Context> {
     /// Clones this entry, annotating each node with the context given to it by `ctx`.
     pub(crate) fn with_context<NewContext>(
         &self,
-        ctx: &mut impl FnMut(&Self) -> NewContext,
-    ) -> MetaDEntry<NewContext> {
-        let entry = match &self.entry {
+        ctx: &mut impl FnMut() -> NewContext,
+    ) -> DEntry<NewContext> {
+        match self {
             DirEntry::File(file) => DirEntry::File(file.clone()),
             DirEntry::Symlink(symlink) => DirEntry::Symlink(symlink.clone()),
             DirEntry::Directory(Directory { entries }) => DirEntry::Directory(Directory {
@@ -124,12 +124,20 @@ impl<Context> MetaDEntry<Context> {
                     .collect(),
             }),
             DirEntry::Other(other) => DirEntry::Other(*other),
-        };
+        }
+    }
+}
 
+impl<Context> MetaDEntry<Context> {
+    /// Clones this entry, annotating each node with the context given to it by `ctx`.
+    pub(crate) fn with_context<NewContext>(
+        &self,
+        ctx: &mut impl FnMut() -> NewContext,
+    ) -> MetaDEntry<NewContext> {
         MetaDEntry {
-            entry,
+            entry: self.entry.with_context(ctx),
             metadata: self.metadata.clone(),
-            context: ctx(self),
+            context: ctx(),
         }
     }
 

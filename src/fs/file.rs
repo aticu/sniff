@@ -44,6 +44,7 @@ pub(crate) trait GenericFile: Serialize + DeserializeOwned + Clone + Sized + Sen
 impl GenericFile for File {
     /// Reads the file information from the specified path.
     fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
+        firestorm::profile_fn!(file_from_path);
         use sha2::Digest as _;
 
         let path = path.as_ref();
@@ -61,80 +62,116 @@ impl GenericFile for File {
         let mut flags = FileFlags::UTF_ENCODING;
 
         let file = fs::File::open(path)?;
-        let buf_reader = io::BufReader::new(&file);
+        let mut buf_reader = io::BufReader::new(&file);
 
-        for byte in buf_reader.bytes() {
-            let byte = byte?;
+        let mut buf = vec![0; 0x10000];
 
-            sha256hasher.update([byte]);
-            md5hasher.update([byte]);
-            first_bytes.try_push(byte).ok();
-            byte_occurrences[byte as usize] += 1;
+        while let Ok(n) = buf_reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+
+            sha256hasher.update(&buf[..n]);
+            md5hasher.update(&buf[..n]);
+
+            for &byte in &buf[..first_bytes.remaining_capacity().min(n)] {
+                first_bytes.try_push(byte).ok();
+            }
 
             if flags.contains(FileFlags::UTF8) {
-                last_utf8_bytes.push(byte);
-                match std::str::from_utf8(&last_utf8_bytes) {
-                    Ok(_) => last_utf8_bytes.clear(),
-                    Err(err) if err.error_len().is_some() => flags.remove(FileFlags::UTF8),
-                    Err(_) => (),
+                let mut start = 0;
+                if !last_utf8_bytes.is_empty() {
+                    for &byte in &buf[..n] {
+                        start += 1;
+                        last_utf8_bytes.push(byte);
+                        match std::str::from_utf8(&last_utf8_bytes) {
+                            Ok(_) => {
+                                last_utf8_bytes.clear();
+                                break;
+                            }
+                            Err(err) if err.error_len().is_some() => {
+                                flags.remove(FileFlags::UTF8);
+                                break;
+                            }
+                            Err(_) => (),
+                        }
+                    }
+                }
+
+                if flags.contains(FileFlags::UTF8) {
+                    match simdutf8::compat::from_utf8(&buf[start..n]) {
+                        Ok(_) => (),
+                        Err(err) => {
+                            if err.error_len().is_none() {
+                                last_utf8_bytes
+                                    .extend(buf[start + err.valid_up_to()..n].iter().copied());
+                            } else {
+                                flags.remove(FileFlags::UTF8);
+                            }
+                        }
+                    }
                 }
             }
 
-            fn valid_utf16(bytes: &[u8], convert: impl Fn([u8; 2]) -> u16) -> Option<bool> {
-                if bytes.len() == 2 {
-                    if let Some(Ok(_)) =
-                        char::decode_utf16([convert(bytes[..].try_into().unwrap())]).next()
-                    {
-                        Some(true)
+            for &byte in &buf[..n] {
+                byte_occurrences[byte as usize] += 1;
+
+                fn valid_utf16(bytes: &[u8], convert: impl Fn([u8; 2]) -> u16) -> Option<bool> {
+                    if bytes.len() == 2 {
+                        if let Some(Ok(_)) =
+                            char::decode_utf16([convert(bytes[..].try_into().unwrap())]).next()
+                        {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    } else if bytes.len() == 4 {
+                        match char::decode_utf16([
+                            convert(bytes[..2].try_into().unwrap()),
+                            convert(bytes[2..].try_into().unwrap()),
+                        ])
+                        .next()
+                        {
+                            Some(Ok(_)) => Some(true),
+                            _ => Some(false),
+                        }
                     } else {
                         None
                     }
-                } else if bytes.len() == 4 {
-                    match char::decode_utf16([
-                        convert(bytes[..2].try_into().unwrap()),
-                        convert(bytes[2..].try_into().unwrap()),
-                    ])
-                    .next()
-                    {
-                        Some(Ok(_)) => Some(true),
-                        _ => Some(false),
-                    }
-                } else {
-                    None
                 }
-            }
 
-            if flags.contains(FileFlags::UTF16BE) {
-                last_utf16be_bytes.push(byte);
-                match valid_utf16(&last_utf16be_bytes, u16::from_be_bytes) {
-                    Some(true) => last_utf16be_bytes.clear(),
-                    Some(false) => flags.remove(FileFlags::UTF16BE),
-                    None => (),
-                }
-            }
-
-            if flags.contains(FileFlags::UTF16LE) {
-                last_utf16le_bytes.push(byte);
-                match valid_utf16(&last_utf16le_bytes, u16::from_le_bytes) {
-                    Some(true) => last_utf16le_bytes.clear(),
-                    Some(false) => flags.remove(FileFlags::UTF16LE),
-                    None => (),
-                }
-            }
-
-            if flags.contains(FileFlags::UTF32BE) || flags.contains(FileFlags::UTF32LE) {
-                last_utf32_bytes.push(byte);
-                if last_utf32_bytes.len() == 4 {
-                    let be = u32::from_be_bytes(last_utf32_bytes[..].try_into().unwrap());
-                    if char::from_u32(be).is_none() {
-                        flags.remove(FileFlags::UTF32BE)
+                if flags.contains(FileFlags::UTF16BE) {
+                    last_utf16be_bytes.push(byte);
+                    match valid_utf16(&last_utf16be_bytes, u16::from_be_bytes) {
+                        Some(true) => last_utf16be_bytes.clear(),
+                        Some(false) => flags.remove(FileFlags::UTF16BE),
+                        None => (),
                     }
+                }
 
-                    let le = u32::from_le_bytes(last_utf32_bytes[..].try_into().unwrap());
-                    if char::from_u32(le).is_none() {
-                        flags.remove(FileFlags::UTF32LE)
+                if flags.contains(FileFlags::UTF16LE) {
+                    last_utf16le_bytes.push(byte);
+                    match valid_utf16(&last_utf16le_bytes, u16::from_le_bytes) {
+                        Some(true) => last_utf16le_bytes.clear(),
+                        Some(false) => flags.remove(FileFlags::UTF16LE),
+                        None => (),
                     }
-                    last_utf32_bytes.clear();
+                }
+
+                if flags.contains(FileFlags::UTF32BE) || flags.contains(FileFlags::UTF32LE) {
+                    last_utf32_bytes.push(byte);
+                    if last_utf32_bytes.len() == 4 {
+                        let be = u32::from_be_bytes(last_utf32_bytes[..].try_into().unwrap());
+                        if char::from_u32(be).is_none() {
+                            flags.remove(FileFlags::UTF32BE)
+                        }
+
+                        let le = u32::from_le_bytes(last_utf32_bytes[..].try_into().unwrap());
+                        if char::from_u32(le).is_none() {
+                            flags.remove(FileFlags::UTF32LE)
+                        }
+                        last_utf32_bytes.clear();
+                    }
                 }
             }
         }
@@ -223,6 +260,12 @@ impl fmt::Debug for Sha256Hash {
         }
 
         Ok(())
+    }
+}
+
+impl fmt::Display for Sha256Hash {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self, f)
     }
 }
 

@@ -219,7 +219,6 @@ impl SnapshotLatest {
         } else {
             Metadata::meaningless()
         };
-        let mut insertion_count = 0;
         let mut root = MetaDirEntry {
             metadata,
             entry: DEntry::empty_dir(),
@@ -233,7 +232,6 @@ impl SnapshotLatest {
             s.spawn(|_| {
                 for (path, entry) in receiver {
                     root.insert(path, entry);
-                    insertion_count += 1;
                 }
             });
 

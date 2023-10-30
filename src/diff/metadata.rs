@@ -6,6 +6,8 @@ use owo_colors::OwoColorize as _;
 
 use crate::{fs::metadata, timestamp::Timestamp};
 
+use super::{compute_change, compute_maybe_change};
+
 /// The text to use for unknown values.
 const UNKOWN_TEXT: &str = "<unknown>";
 
@@ -565,4 +567,150 @@ pub(super) fn display_metadata(
     }
 
     Ok(())
+}
+
+use sniff_interop as interop;
+
+/// Computes the difference between the two given metadata instances.
+pub(crate) fn compute_meta_info_change(
+    old: &crate::fs::Metadata,
+    new: &crate::fs::Metadata,
+) -> interop::MetadataInfo<interop::Timestamp> {
+    let mut changes = Vec::new();
+
+    if let Some(change) = compute_change(&old.size, &new.size) {
+        changes.push(interop::MetadataChange::Size(change));
+    }
+
+    let get_ts_change = |access: fn(&crate::fs::Metadata) -> Option<Timestamp>| {
+        compute_maybe_change(
+            &access(old).map(|ts| ts.into()),
+            &access(new).map(|ts| ts.into()),
+        )
+    };
+
+    let created = get_ts_change(|meta| meta.created);
+    let modified = get_ts_change(|meta| meta.modified);
+    let accessed = get_ts_change(|meta| meta.accessed);
+    let inode_modified = get_ts_change(|meta| meta.mft_modified);
+
+    if let Some(change) = compute_change(
+        &old.ntfs_attributes.map(|attr| attr.bits()),
+        &new.ntfs_attributes.map(|attr| attr.bits()),
+    ) {
+        changes.push(interop::MetadataChange::NtfsAttributes(change));
+    }
+    if let Some(change) = compute_change(&old.unix_permissions, &new.unix_permissions) {
+        changes.push(interop::MetadataChange::UnixPermissions(change));
+    }
+    if let Some(change) = compute_change(&old.nlink, &new.nlink) {
+        changes.push(interop::MetadataChange::Nlink(change));
+    }
+    if let Some(change) = compute_change(&old.uid, &new.uid) {
+        changes.push(interop::MetadataChange::Uid(change));
+    }
+    if let Some(change) = compute_change(&old.gid, &new.gid) {
+        changes.push(interop::MetadataChange::Gid(change));
+    }
+    if let Some(change) = compute_change(&old.reparse_data, &new.reparse_data) {
+        changes.push(interop::MetadataChange::NamedStream(
+            interop::NamedStreamType::ReparseData,
+            change,
+        ));
+    }
+    if let Some(change) = compute_change(&old.acl, &new.acl) {
+        changes.push(interop::MetadataChange::NamedStream(
+            interop::NamedStreamType::AccessControlList,
+            change,
+        ));
+    }
+    if let Some(change) = compute_change(&old.dos_name, &new.dos_name) {
+        changes.push(interop::MetadataChange::NamedStream(
+            interop::NamedStreamType::DosName,
+            change,
+        ));
+    }
+    if let Some(change) = compute_change(&old.object_id, &new.object_id) {
+        changes.push(interop::MetadataChange::NamedStream(
+            interop::NamedStreamType::ObjectId,
+            change,
+        ));
+    }
+    if let Some(change) = compute_change(&old.efs_info, &new.efs_info) {
+        changes.push(interop::MetadataChange::NamedStream(
+            interop::NamedStreamType::EncryptedFileSystemInfo,
+            change,
+        ));
+    }
+    if let Some(change) = compute_change(&old.ea, &new.ea) {
+        changes.push(interop::MetadataChange::NamedStream(
+            interop::NamedStreamType::ExtendedAttributes,
+            change,
+        ));
+    }
+
+    /// Gets a single stream from the given optional streams.
+    fn get_from_streams<'a>(
+        name: &std::ffi::OsStr,
+        streams: &'a Option<metadata::AlternateDataStreams>,
+    ) -> &'a Option<Vec<u8>> {
+        if let Some(streams) = streams {
+            if let Some(stream) = streams.streams.get(name) {
+                stream
+            } else {
+                &None
+            }
+        } else {
+            &None
+        }
+    }
+
+    if let Some(streams) = &old.streams {
+        for (name, ads) in &streams.streams {
+            if let Some(change) = compute_change(ads, get_from_streams(name, &new.streams)) {
+                changes.push(interop::MetadataChange::NamedStream(
+                    interop::NamedStreamType::AlternateDataStream {
+                        name: name.to_string_lossy().into_owned(),
+                    },
+                    change,
+                ));
+            }
+        }
+    }
+
+    if let Some(streams) = &new.streams {
+        for (name, ads) in &streams.streams {
+            if let Some(change) = compute_change(get_from_streams(name, &old.streams), ads) {
+                changes.push(interop::MetadataChange::NamedStream(
+                    interop::NamedStreamType::AlternateDataStream {
+                        name: name.to_string_lossy().into_owned(),
+                    },
+                    change,
+                ));
+            }
+        }
+    }
+
+    interop::MetadataInfo {
+        changes,
+        inode: compute_maybe_change(&old.inode, &new.inode),
+        created,
+        modified,
+        accessed,
+        inode_modified,
+    }
+}
+
+/// Computes the metadata info for just a single entry.
+pub(crate) fn compute_meta_info_from_single(
+    meta: &crate::fs::Metadata,
+) -> interop::MetadataInfo<interop::Timestamp> {
+    interop::MetadataInfo {
+        changes: Vec::new(),
+        inode: interop::MaybeChange::Same(meta.inode),
+        created: interop::MaybeChange::Same(meta.created.map(|ts| ts.into())),
+        modified: interop::MaybeChange::Same(meta.modified.map(|ts| ts.into())),
+        accessed: interop::MaybeChange::Same(meta.accessed.map(|ts| ts.into())),
+        inode_modified: interop::MaybeChange::Same(meta.mft_modified.map(|ts| ts.into())),
+    }
 }

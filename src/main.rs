@@ -65,6 +65,9 @@ enum Config {
         /// display only the name of changed files
         #[structopt(short = "r", long)]
         raw: bool,
+        /// output the changeset in JSON instead of normal output
+        #[structopt(long)]
+        changeset: bool,
         /// whether to include metadata changes
         #[structopt(short = "i", long)]
         include_metadata: bool,
@@ -91,6 +94,16 @@ enum Config {
         /// a path to the database to use during the analysis
         #[structopt(short = "D", long)]
         database: Option<PathBuf>,
+    },
+    /// compute changesets between all adjacent snapshots in a folder
+    Changesets {
+        /// the folder for which the changeset should be computed
+        folder: PathBuf,
+        /// the file to write the result into, stdout if not given
+        output: Option<PathBuf>,
+        /// use a shorter, faster binary representation
+        #[structopt(short = "b", long)]
+        binary: bool,
     },
     /// updates all snapshots in the "source" directory to the newest version, storing them in "target"
     UpdateSnapshots {
@@ -200,6 +213,7 @@ fn run(config: Config) -> anyhow::Result<()> {
             show_known,
             summary_depth,
             raw,
+            changeset,
             include_metadata,
             show_hashes,
             output_image,
@@ -322,6 +336,10 @@ fn run(config: Config) -> anyhow::Result<()> {
 
                     println!("{}", path.display());
                 }
+            } else if changeset {
+                let changeset = diff::compute_changeset(path, &diff, &filter, former.timestamp);
+
+                println!("{}", serde_json::to_string_pretty(&changeset)?);
             } else {
                 print!(
                     "{}",
@@ -412,6 +430,74 @@ fn run(config: Config) -> anyhow::Result<()> {
                 drop(former);
                 drop(latter);
             }
+        }
+        Config::Changesets {
+            folder,
+            output,
+            binary,
+        } => {
+            let dir_iter = std::fs::read_dir(&folder)
+                .with_context(|| format!("Failed to read directory {}", folder.display()))?;
+
+            let mut paths = Vec::new();
+
+            for entry in dir_iter {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        eprintln!("error getting directory entry: {}", err);
+                        continue;
+                    }
+                };
+
+                if let Ok(metadata) = entry.metadata() && let Ok(created) = metadata.created() {
+                    paths.push((created, entry.path()));
+                }
+            }
+
+            paths.sort_by_key(|(created, _)| *created);
+
+            let mut last_iter_snapshot = None::<snapshot::SnapshotLatest>;
+            let mut changesets = Vec::new();
+
+            for (_, path) in paths {
+                let new_snapshot = match snapshot::Snapshot::from_file(&path).with_context(|| {
+                    format!("Could not read snapshot from file {}", path.display())
+                }) {
+                    Ok(new_snapshot) => new_snapshot,
+                    Err(err) => {
+                        eprintln!("{err}");
+                        continue;
+                    }
+                };
+
+                if let Some(prev_snapshot) = last_iter_snapshot {
+                    let diff = diff::DiffTree::compute(&prev_snapshot.root, &new_snapshot.root);
+
+                    let changeset = diff::compute_changeset(
+                        "/",
+                        &diff,
+                        diff::filters::changes_only(true),
+                        prev_snapshot.timestamp,
+                    );
+
+                    changesets.push(changeset);
+                }
+
+                last_iter_snapshot = Some(new_snapshot);
+            }
+
+            let encoded = if binary {
+                postcard::to_stdvec(&changesets)?
+            } else {
+                serde_json::to_vec_pretty(&changesets)?
+            };
+
+            if let Some(output) = output {
+                std::fs::File::create(output)?.write_all(&encoded)?;
+            } else {
+                std::io::stdout().write_all(&encoded)?;
+            };
         }
         Config::UpdateSnapshots { source, target } => {
             let dir_iter = std::fs::read_dir(&source)

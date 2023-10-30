@@ -90,7 +90,7 @@ impl fmt::Debug for Timestamp {
             "{}",
             time::OffsetDateTime::from(*self)
                 .format(time::macros::format_description!(
-                    "[year]-[month]-[day] [hour]:[minute]:[second]"
+                    "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:1+]"
                 ))
                 .unwrap()
         )
